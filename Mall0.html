@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="sv"><head><meta charset="utf-8"><title>Mall – steg 0</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;height:100%;background:#0b0b10;overflow:hidden}
+#c{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000}</style></head>
+<body><canvas id="c"></canvas>
+<script>
+'use strict';
+/* ============================================================================
+   MALL – STEG 0.  Allt är uppdelat i taggade sektioner: sök på "[TAGG]".
+   Regel: nytt innehåll läggs i [REG:*] (register) eller i en egen [SCENE:*].
+   Kärnan ([CORE] ... [UI]) ska sällan behöva röras.
+   Allt slumpas från EN seed (G.seed) => kartor är identiska tills omstart,
+   och en sparfil blir senare bara G som JSON.
+   ============================================================================ */
+
+/* ===== [CORE] canvas, skalning, scenbyte, huvudloop ===== */
+const cv=document.getElementById('c'),g=cv.getContext('2d');
+let VW=960,VH=540,clock=0;                       // logisk storlek (varje scen anger egen), speltid
+function setSize(w,h){VW=w;VH=h;cv.width=w;cv.height=h;fit()}
+function fit(){const k=Math.min(innerWidth/VW,innerHeight/VH);cv.style.width=VW*k+'px';cv.style.height=VH*k+'px'}
+addEventListener('resize',fit);
+const SCENES={};                                 // [REG:SCENES] fylls av [SCENE:*]-sektionerna
+let scene=null;
+function go(id,p){                               // byt scen: go('town')
+  if(scene&&scene.exit)scene.exit();
+  scene=SCENES[id];scene.id=id;UI.cur=null;scene.enter(p||{});setSize(scene.w,scene.h);Music.play(scene.music);
+}
+const DT=1/60;let last=0,acc=0;
+function frame(t){requestAnimationFrame(frame);acc+=Math.min(.1,(t-last)/1000||0);last=t;
+  while(acc>=DT){step();acc-=DT}
+  g.clearRect(0,0,VW,VH);scene.draw();if(UI.cur)UI.draw()}
+function step(){clock+=DT;Music.tick();
+  if(A.hit('mute'))SND.toggle();
+  if(UI.cur)UI.update();
+  else if(scene.id!=='title'&&A.hit('pause'))pauseMenu();
+  else scene.update(DT);
+  A.endFrame()}
+function pauseMenu(){const home=scene.id==='world';   // ENTER = paus i alla scener utom titel
+  UI.menu('PAUS',home?['Fortsätt','Till titelskärmen']:['Fortsätt','Återgå till kartan'],i=>{if(i===1)go(home?'title':'world')})}
+
+/* ===== [INPUT] handlingar istället för tangenter – varje scen tolkar dem själv ===== */
+const KEYMAP={left:['ArrowLeft','KeyA'],right:['ArrowRight','KeyD'],up:['ArrowUp','KeyW'],down:['ArrowDown','KeyS'],
+  confirm:['Space','KeyZ'],cancel:['Escape','KeyX'],pause:['Enter'],mute:['KeyM']};
+const A={held:{},pressed:{},hit(a){return!!this.pressed[a]},down(a){return!!this.held[a]},endFrame(){this.pressed={}}};
+const axis=(n,p)=>(A.down(p)?1:0)-(A.down(n)?1:0);
+addEventListener('keydown',e=>{for(const a in KEYMAP)if(KEYMAP[a].includes(e.code)){if(!A.held[a])A.pressed[a]=1;A.held[a]=1;e.preventDefault()}SND.init()});
+addEventListener('keyup',e=>{for(const a in KEYMAP)if(KEYMAP[a].includes(e.code))A.held[a]=0});
+
+/* ===== [RNG] seed -> delseed per modul ===== */
+function mulberry32(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function seedOf(base,tag){let h=base>>>0;for(const c of tag)h=Math.imul(h^c.charCodeAt(0),2654435761)>>>0;return h}
+const rngFor=tag=>mulberry32(seedOf(G.seed,tag));  // t.ex. rngFor('world'), rngFor('town')
+
+/* ===== [STATE] spelets tillstånd. ENDAST ren JSON-data här (inga Map/Set/funktioner) ===== */
+let G=null;
+function newGame(){G={seed:(Math.random()*2**32)>>>0,gold:50,hp:3,lastPortal:null,skip:null,flags:{}};WORLD=null}
+const serialize=()=>JSON.stringify(G);           // [TODO:SAVE] knyts till meny senare
+const restore=j=>{G=JSON.parse(j);WORLD=null};
+const P={x:0,y:0,vy:0,face:0,ph:0,mv:0};         // gemensam spelarfigur (face: 0 ner,1 upp,2 vänster,3 höger)
+
+/* ===== [AUDIO] ljudeffekter + musikmotor (slingor ligger i [REG:TRACKS]) ===== */
+const SND={ctx:null,mute:false,
+  init(){if(this.ctx)return;try{this.ctx=new(window.AudioContext||window.webkitAudioContext)();this.master=this.ctx.createGain();
+    this.master.gain.value=.5;this.master.connect(this.ctx.destination);Music.start()}catch(e){}},
+  toggle(){this.mute=!this.mute;if(this.master)this.master.gain.value=this.mute?0:.5},
+  tone(f,d,type='square',v=.05,t){const c=this.ctx;if(!c)return;t=t??c.currentTime;const o=c.createOscillator(),n=c.createGain();
+    o.type=type;o.frequency.value=f;n.gain.setValueAtTime(v,t);n.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(n);n.connect(this.master);o.start(t);o.stop(t+d)},
+  sfx(k){const s=SFX[k];if(s&&this.ctx)s.forEach(([f,d,ty,v],i)=>this.tone(f,d,ty,v,this.ctx.currentTime+i*.07))}};
+const SFX={ // [REG:SFX] namn:[[frekvens,längd,vågform,volym],...]
+  sel:[[660,.06,'square',.05]],ok:[[523,.07,'square',.05],[784,.1,'square',.05]],hit:[[160,.18,'sawtooth',.07]]};
+const mf=s=>{const m=/^([A-G])(#|b)?(\d)$/.exec(s);return 440*2**((12*(+m[3]+1)+{C:0,D:2,E:4,F:5,G:7,A:9,B:11}[m[1]]+(m[2]=='#'?1:m[2]=='b'?-1:0)-69)/12)};
+const TRACKS={ // [REG:TRACKS] bpm, vågform, lead/bass = ett åttondelssteg per token, '-' = paus
+  title:{bpm:90,w:'square',lead:'A4 - C5 E5 A5 - E5 - D5 - F5 A5 G5 - E5 -',bass:'A2 - - - A2 - - - F2 - - - G2 - - -'},
+  world:{bpm:100,w:'triangle',lead:'E4 G4 C5 G4 E4 G4 D5 G4 D4 F4 B4 F4 C4 E4 G4 -',bass:'C3 - - - C3 - - - G2 - - - C3 - - -'},
+  town:{bpm:110,w:'square',lead:'G4 - B4 D5 - B4 G4 - A4 - C5 E5 - C5 A4 -',bass:'G2 - D3 - G2 - D3 - A2 - E3 - A2 - E3 -'},
+  cave:{bpm:70,w:'triangle',lead:'D4 - - F4 - - A3 - - C4 - - - - - -',bass:'D2 - - - - - D2 - - - - - A1 - - -'},
+  ruins:{bpm:120,w:'square',lead:'E4 - G4 - B4 - A4 G4 E4 - G4 - D4 - - -',bass:'E2 - E2 - E2 - E2 - D2 - D2 - D2 - D2 -'},
+  air:{bpm:140,w:'square',lead:'C5 E5 G5 E5 C5 E5 G5 B5 A4 C5 E5 C5 G4 B4 D5 B4',bass:'C3 - C3 - C3 - C3 - A2 - A2 - G2 - G2 -'}};
+const Music={want:null,cur:null,pos:0,next:0,
+  play(n){this.want=n;if(!SND.ctx||this.cur===n)return;this.cur=n;this.pos=0;this.next=SND.ctx.currentTime+.1},
+  start(){const w=this.want;this.cur=null;if(w)this.play(w)},
+  tick(){const c=SND.ctx,T=TRACKS[this.cur];if(!c||!T)return;if(this.next<c.currentTime-.5)this.next=c.currentTime+.1;
+    const L=T.lead.split(' '),B=T.bass.split(' '),st=60/T.bpm/2;
+    while(this.next<c.currentTime+.15){const i=this.pos++,l=L[i%L.length],b=B[i%B.length];
+      if(l!=='-')SND.tone(mf(l),st*.9,T.w,.035,this.next);if(b!=='-')SND.tone(mf(b),st*1.8,'triangle',.06,this.next);this.next+=st}}};
+
+/* ===== [GFX] gemensamma grafikelement (samma figur i alla banor) ===== */
+const GFX={
+  // fötterna står i (x,y). face 0 framifrån, 1 bakifrån, 2/3 sida. ph=gångfas, mvg=rör sig
+  person(x,y,f,ph,mvg,col='#4a90d9',hair='#6a4020'){
+    const s=mvg?Math.sin(ph)*3:0,side=f>1,d=f===3?1:-1;
+    g.fillStyle='rgba(0,0,0,.3)';g.beginPath();g.ellipse(x,y,8,3,0,0,7);g.fill();
+    g.fillStyle='#252535';
+    if(side){g.fillRect(x-3+s,y-9,5,9);g.fillRect(x-3-s,y-9,5,9)}else{g.fillRect(x-6,y-9+s*.5,5,9);g.fillRect(x+1,y-9-s*.5,5,9)}
+    g.fillStyle=col;g.fillRect(side?x-5:x-7,y-23,side?10:14,15);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(x,y-29,7,0,7);g.fill();
+    g.fillStyle=hair;g.beginPath();g.arc(x,y-29,7.5,f===1?0:Math.PI,f===1?7:0);g.fill();
+    g.fillStyle='#222';
+    if(f===0){g.fillRect(x-4,y-29,2,2);g.fillRect(x+2,y-29,2,2)}else if(side)g.fillRect(x+d*3,y-29,2,2)},
+  text(s,x,y,col='#fff',size=16,al='left'){g.font=size+'px monospace';g.fillStyle=col;g.textAlign=al;g.fillText(s,x,y)},
+  hud(){GFX.text('♥'.repeat(G.hp)+'   Guld: '+G.gold,10,22,'#fff',16)}};
+const T=32;                                       // tilestorlek för alla kartor
+function blocked(x,y,hw,hh,S){const x0=Math.floor((x-hw)/T),x1=Math.floor((x+hw-.01)/T),y0=Math.floor((y-hh)/T),y1=Math.floor((y+hh-.01)/T);
+  for(let j=y0;j<=y1;j++)for(let i=x0;i<=x1;i++)if(S(i,j))return 1;return 0}
+function mv(p,k,d,hw,hh,S){const s=Math.sign(d);let n=Math.abs(d);while(n>0){const st=Math.min(1,n)*s;p[k]+=st;if(blocked(p.x,p.y,hw,hh,S)){p[k]-=st;return 1}n--}return 0}
+function tdMove(dt,sp,S,hw,hh){                   // gemensam ovanifrånrörelse (karta, stad, grotta)
+  const ax=axis('left','right'),ay=axis('up','down');P.mv=ax||ay;
+  if(P.mv){const l=Math.hypot(ax,ay);mv(P,'x',ax/l*sp*dt,hw,hh,S);mv(P,'y',ay/l*sp*dt,hw,hh,S);P.face=ay?(ay>0?0:1):(ax<0?2:3);P.ph+=dt*sp/10}}
+
+/* ===== [UI] dialogrutor och menyer (modala: scenen står still medan de är öppna) ===== */
+const UI={cur:null,
+  dialog(lines,done){this.cur={k:'d',lines,i:0,done}},                 // UI.dialog(['rad1','rad2'],()=>...)
+  menu(title,opts,cb){this.cur={k:'m',title,opts,i:0,cb}},             // cb(index) – -1 vid Esc/X
+  update(){const c=this.cur,ok=A.hit('confirm')||A.hit('pause');
+    if(c.k==='d'){if(ok){SND.sfx('sel');if(++c.i>=c.lines.length){this.cur=null;c.done&&c.done()}}}
+    else{const n=c.opts.length;if(A.hit('up'))c.i=(c.i+n-1)%n;if(A.hit('down'))c.i=(c.i+1)%n;
+      if(ok){SND.sfx('sel');this.cur=null;c.cb(c.i)}else if(A.hit('cancel')){this.cur=null;c.cb(-1)}}},
+  wrap(s,w){const out=[];let l='';for(const o of s.split(' ')){if(g.measureText(l+o).width>w&&l){out.push(l);l=''}l+=o+' '}out.push(l);return out},
+  draw(){const c=this.cur;g.font='16px monospace';g.textAlign='left';
+    if(c.k==='d'){const x=16,y=VH-112,w=VW-32;g.fillStyle='rgba(10,10,30,.92)';g.fillRect(x,y,w,96);g.strokeStyle='#fff';g.strokeRect(x+.5,y+.5,w,96);
+      this.wrap(c.lines[c.i],w-28).forEach((l,i)=>GFX.text(l,x+14,y+28+i*22));
+      if(clock%1<.6)GFX.text('▼',x+w-24,y+84)}
+    else{const rows=c.title?[c.title,...c.opts]:c.opts,mw=Math.max(...rows.map(r=>g.measureText(r).width))+70,h=rows.length*28+20,x=(VW-mw)/2,y=(VH-h)/2;
+      g.fillStyle='rgba(10,10,30,.94)';g.fillRect(x,y,mw,h);g.strokeStyle='#fff';g.strokeRect(x+.5,y+.5,mw,h);
+      if(c.title)GFX.text(c.title,VW/2,y+30,'#ffd870',16,'center');
+      c.opts.forEach((o,i)=>{const yy=y+30+(c.title?28:0)+i*28;GFX.text((i===c.i?'▶ ':'  ')+o,x+20,yy,i===c.i?'#fff':'#9a9ab0')})}}};
+
+/* ===== [REG:BLOCKS] blocktyper. s=1 solid. d(px,py,tx,ty) ritar. Lägg till nya rader här ===== */
+const fillT=(c)=>(x,y)=>{g.fillStyle=c;g.fillRect(x,y,T,T)};
+const spec=(x,y,tx,ty,c)=>{if((tx*7+ty*13)%5===0){g.fillStyle=c;g.fillRect(x+8,y+10,3,3)}};
+const BLOCKS={
+  grass:{s:0,d(x,y,tx,ty){fillT('#3d7d38')(x,y);spec(x,y,tx,ty,'#4f9448')}},
+  sand:{s:0,d(x,y,tx,ty){fillT('#cdb272')(x,y);spec(x,y,tx,ty,'#b99c5c')}},
+  tree:{s:1,d(x,y,tx,ty){BLOCKS.grass.d(x,y,tx,ty);g.fillStyle='#5a3a1c';g.fillRect(x+13,y+18,6,12);g.fillStyle='#1f5a22';g.beginPath();g.arc(x+16,y+13,12,0,7);g.fill();g.fillStyle='#2b7a2e';g.beginPath();g.arc(x+12,y+10,6,0,7);g.fill()}},
+  rock:{s:1,d(x,y,tx,ty){BLOCKS.grass.d(x,y,tx,ty);g.fillStyle='#6a707a';g.beginPath();g.moveTo(x+3,y+28);g.lineTo(x+8,y+8);g.lineTo(x+18,y+3);g.lineTo(x+29,y+14);g.lineTo(x+28,y+28);g.fill();g.fillStyle='#8c939e';g.fillRect(x+10,y+9,8,4)}},
+  water:{s:1,d(x,y){fillT('#2a5fa8')(x,y);g.strokeStyle='#4a82c8';g.lineWidth=1;g.beginPath();const o=Math.sin(clock*2+x*.05)*3;g.moveTo(x+4,y+16+o);g.quadraticCurveTo(x+10,y+11+o,x+16,y+16+o);g.quadraticCurveTo(x+22,y+21+o,x+28,y+16+o);g.stroke()}},
+  portal:{s:0,d(x,y,tx,ty){BLOCKS.sand.d(x,y,tx,ty);const d=PORTALS[WORLD.pt[tx+','+ty]],r=11+Math.sin(clock*4)*2;
+    g.strokeStyle=d.c;g.lineWidth=3;g.beginPath();g.arc(x+16,y+16,r,0,7);g.stroke();GFX.text(d.ch,x+16,y+22,d.c,16,'center')}},
+  floor:{s:0,d(x,y,tx,ty){fillT((tx+ty)%2?'#7a6a58':'#756552')(x,y)}},
+  wall:{s:1,d(x,y,tx,ty){fillT('#8a4a3a')(x,y);g.fillStyle='#6a362a';g.fillRect(x,y+15,T,2);g.fillRect(x+(ty%2?8:20),y,2,15);g.fillRect(x+(ty%2?20:8),y+17,2,15)}},
+  cfloor:{s:0,d(x,y,tx,ty){fillT((tx+ty)%2?'#3a3646':'#363242')(x,y)}},
+  cwall:{s:1,d(x,y,tx,ty){fillT('#1c1a24')(x,y);g.fillStyle='#2a2736';g.fillRect(x+4+(tx*5%9),y+6,10,8)}},
+  gate:{s:0,d(x,y){fillT('#2a2010')(x,y);g.fillStyle='#e8c050';g.fillRect(x,y,T,3)}},
+  crate:{s:1,d(x,y,tx,ty){BLOCKS.floor.d(x,y,tx,ty);g.fillStyle='#8a6a30';g.fillRect(x+4,y+4,24,24);g.strokeStyle='#5a4420';g.strokeRect(x+4.5,y+4.5,23,23)}},
+  ccrate:{s:1,d(x,y,tx,ty){BLOCKS.cfloor.d(x,y,tx,ty);g.fillStyle='#55506a';g.beginPath();g.arc(x+16,y+18,11,0,7);g.fill()}},
+  rblock:{s:1,d(x,y){fillT('#7a7468')(x,y);g.strokeStyle='#4a463e';g.strokeRect(x+.5,y+.5,T-1,T-1)}}};
+
+/* ===== [REG:PORTALS] portaltyper på världskartan (en av varje i teststadiet) ===== */
+const PORTALS={town:{ch:'S',c:'#e8c050',q:'Besöka staden?',scene:'town'},cave:{ch:'G',c:'#b080ff',q:'Besöka grottan?',scene:'cave'},
+  ruins:{ch:'R',c:'#e08060',q:'Besöka ruinstaden?',scene:'ruins'},airfield:{ch:'F',c:'#70d0ff',q:'Besöka flygplatsen?',scene:'airfield'}};
+
+/* ===== [REG:NPCS] byinvånare: lines = dialog, shop = öppnar handelsmenyn ===== */
+const NPCS={elder:{c:'#b0a0d0',lines:['Välkommen, resenär.','Stadsmuren har stått längre än någon minns.']},
+  trader:{c:'#d0a040',shop:1,lines:['Varor? Hyllorna är tomma än så länge.']},
+  villager:{c:'#70b070',lines:['De säger att grottan har en boss längst in.','Flygplatsen ligger långt från ruinerna.']}};
+/* ===== [REG:ENEMIES] fiender (ai körs varje steg; S = kollisionsfunktion) ===== */
+const ENEMIES={blob:{c:'#9a3ac8',sp:40,ai(e,dt,S){if((e.t-=dt)<=0){const a=Math.random()*6.28;e.vx=Math.cos(a);e.vy=Math.sin(a);e.t=.5+Math.random()}
+  if(mv(e,'x',e.vx*this.sp*dt,8,8,S)){e.vx*=-1}if(mv(e,'y',e.vy*this.sp*dt,8,8,S)){e.vy*=-1}},
+  draw(e){g.fillStyle=this.c;g.beginPath();g.ellipse(e.x,e.y+3,10,8+Math.sin(clock*6+e.x)*1.5,0,0,7);g.fill();g.fillStyle='#fff';g.fillRect(e.x-4,e.y,3,3);g.fillRect(e.x+2,e.y,3,3)}}};
+
+/* ===== [SCENE:TITLE] startskärm ===== */
+SCENES.title={w:960,h:540,music:'title',stars:[],open:0,
+  enter(){const r=mulberry32(7);this.stars=Array.from({length:90},()=>[r()*960,r()*540,r()*2+1]);this.open=0},
+  update(){if(!this.open){this.open=1;UI.menu('',['Starta nytt spel','Ladda spel'],i=>{this.open=0;
+    if(i===0){newGame();go('world')}else if(i===1)UI.dialog(['Att ladda från .json kommer i ett senare steg.'])})}},
+  draw(){g.fillStyle='#10102a';g.fillRect(0,0,VW,VH);g.fillStyle='#fff';this.stars.forEach(([x,y,s])=>g.fillRect(x,y+Math.sin(clock+x)*2,s,s));
+    GFX.text('NAMNLÖST SPEL',VW/2,150,'#ffd870',56,'center');GFX.text('mallstruktur, steg 0',VW/2,185,'#9a9ab0',18,'center');
+    GFX.text('Pilar/WASD gå · Mellanslag/Z välj · Enter paus · M ljud av/på',VW/2,VH-24,'#707090',14,'center')}};
+
+/* ===== [SCENE:WORLD] världskarta (genereras ur seed; WORLD är härledd data, inte sparad) ===== */
+const WW=60,WH=40,DIR4=[[1,0],[-1,0],[0,1],[0,-1]];let WORLD=null;
+function genWorld(){const r=rngFor('world'),m=[];
+  const noise=sz=>{const gw=Math.ceil(WW/sz)+2,gh=Math.ceil(WH/sz)+2,v=Array.from({length:gh},()=>Array.from({length:gw},()=>r())),sm=t=>t*t*(3-2*t);
+    return(x,y)=>{const fx=x/sz,fy=y/sz,ix=fx|0,iy=fy|0,sx=sm(fx-ix),sy=sm(fy-iy),a=v[iy][ix],b=v[iy][ix+1],c=v[iy+1][ix],d=v[iy+1][ix+1];
+      return a+(b-a)*sx+(c-a)*sy+(a-b-c+d)*sx*sy}};
+  const E=noise(9),F=noise(4);
+  for(let y=0;y<WH;y++){m[y]=[];for(let x=0;x<WW;x++){const ed=Math.min(x,y,WW-1-x,WH-1-y),h=E(x,y)+.15-(ed<5?(5-ed)*.14:0),f=F(x,y);
+    m[y][x]=h<.36?'water':h<.41?'sand':h>.74?'rock':f>.64?'tree':'grass'}}
+  const S=(x,y)=>x<0||y<0||x>=WW||y>=WH||BLOCKS[m[y][x]].s,seen=new Uint8Array(WW*WH);let best=[];
+  for(let y=0;y<WH;y++)for(let x=0;x<WW;x++){if(seen[y*WW+x]||S(x,y))continue;const q=[[x,y]];seen[y*WW+x]=1;   // störst sammanhängande landyta
+    for(let i=0;i<q.length;i++)for(const[dx,dy]of DIR4){const nx=q[i][0]+dx,ny=q[i][1]+dy;if(!S(nx,ny)&&!seen[ny*WW+nx]){seen[ny*WW+nx]=1;q.push([nx,ny])}}
+    if(q.length>best.length)best=q}
+  const dc=([x,y])=>Math.hypot(x-WW/2,y-WH/2),start=best.reduce((a,b)=>dc(a)<dc(b)?a:b);
+  const cand=best.filter(([x,y])=>m[y][x]==='grass'||m[y][x]==='sand').map(([x,y])=>({x,y}));
+  const portals=[],pt={},all=[{x:start[0],y:start[1]}];                                                       // portaler: alltid nåbara
+  for(const type in PORTALS){let sp=18,list;do{list=cand.filter(c=>all.every(q=>Math.hypot(q.x-c.x,q.y-c.y)>=sp));sp-=2}while(!list.length&&sp>0);
+    const c=list[Math.floor(r()*list.length)]||cand[0];all.push(c);portals.push({type,x:c.x,y:c.y});m[c.y][c.x]='portal';pt[c.x+','+c.y]=type}
+  WORLD={m,start,portals,pt}}
+SCENES.world={w:960,h:540,music:'world',cx:0,cy:0,
+  S:(i,j)=>i<0||j<0||i>=WW||j>=WH||BLOCKS[WORLD.m[j][i]].s,
+  enter(){if(!WORLD)genWorld();const p=G.lastPortal&&WORLD.portals.find(q=>q.type===G.lastPortal),s=p?[p.x,p.y]:WORLD.start;
+    P.x=s[0]*T+16;P.y=s[1]*T+16;P.face=0;P.mv=0;if(p)G.skip=p.x+','+p.y},      // man står på portalen man kom ut ur
+  update(dt){tdMove(dt,130,this.S,8,8);const tx=P.x/T|0,ty=P.y/T|0,k=tx+','+ty,pt=WORLD.pt[k];
+    if(!pt)G.skip=null;else if(G.skip!==k){G.skip=k;const d=PORTALS[pt];UI.menu(d.q,['Ja','Nej'],i=>{if(i===0){G.lastPortal=pt;SND.sfx('ok');go(d.scene)}})}},
+  draw(){const cx=Math.max(0,Math.min(WW*T-VW,P.x-VW/2)),cy=Math.max(0,Math.min(WH*T-VH,P.y-VH/2));
+    for(let y=cy/T|0;y<=(cy+VH)/T;y++)for(let x=cx/T|0;x<=(cx+VW)/T;x++)if(WORLD.m[y]&&WORLD.m[y][x])BLOCKS[WORLD.m[y][x]].d(x*T-cx,y*T-cy,x,y);
+    GFX.person(P.x-cx,P.y+8-cy,P.face,P.ph,P.mv);GFX.hud()}};
+
+/* ===== [SCENE:ROOM] stad + grotta delar rumsmotor (ovanifrånvy, 16x12 rutor). Nya rumstyper: makeRoom('id',{...}) ===== */
+function makeRoom(id,cfg){const RW=16,RH=12;let map,npcs,en,inv;
+  const S=(i,j)=>i<0||j<0||i>=RW||j>=RH||BLOCKS[map[j][i]].s||npcs.some(n=>n.tx===i&&n.ty===j);
+  SCENES[id]={w:RW*T,h:RH*T,music:cfg.music,
+    enter(){const r=rngFor(id);inv=0;npcs=[];en=[];map=Array.from({length:RH},(_,y)=>Array.from({length:RW},(_,x)=>x*y===0||x===RW-1||y===RH-1?cfg.wall:cfg.floor));
+      map[RH-1][7]=map[RH-1][8]='gate';
+      const free=[];for(let y=1;y<RH-4;y++)for(let x=1;x<RW-1;x++)free.push([x,y]);                // fria platser (ej närmast porten)
+      const take=()=>free.splice(Math.floor(r()*free.length),1)[0];
+      for(let i=0;i<8;i++){const[x,y]=take();map[y][x]=cfg.crate}
+      (cfg.npcs||[]).forEach(k=>{const[x,y]=take();map[y][x]=cfg.floor;npcs.push({k,tx:x,ty:y})});
+      for(let i=0;i<(cfg.enemies||0);i++){const[x,y]=take();map[y][x]=cfg.floor;en.push({k:'blob',x:x*T+16,y:y*T+16,t:0,vx:0,vy:0})}  // [TODO:BOSS] bossplats i grottan
+      P.x=8*T;P.y=(RH-2)*T+16;P.face=1;P.mv=0},
+    update(dt){tdMove(dt,120,S,7,7);
+      if(map[P.y/T|0][P.x/T|0]==='gate')return go('world');
+      if(A.hit('confirm')){const n=npcs.find(n=>Math.hypot(n.tx*T+16-P.x,n.ty*T+16-P.y)<44);
+        if(n){const d=NPCS[n.k];SND.sfx('sel');UI.dialog(d.lines,()=>{if(d.shop)UI.menu('Handel',['(inga varor ännu)','Tillbaka'],()=>{})})}}
+      inv-=dt;for(const e of en){ENEMIES[e.k].ai(e,dt,S);
+        if(inv<=0&&Math.hypot(e.x-P.x,e.y-P.y)<16){inv=1;G.hp--;SND.sfx('hit')}}                  // [TODO:COMBAT] spelaren kan inte skada ännu
+      if(G.hp<=0){G.hp=3;UI.dialog(['Du svimmade och bars tillbaka till kartan.'],()=>go('world'))}},
+    draw(){for(let y=0;y<RH;y++)for(let x=0;x<RW;x++)BLOCKS[map[y][x]].d(x*T,y*T,x,y);
+      const L=[...npcs.map(n=>({y:n.ty*T+28,d:()=>GFX.person(n.tx*T+16,n.ty*T+28,0,0,0,NPCS[n.k].c,'#ddd')})),...en.map(e=>({y:e.y,d:()=>ENEMIES[e.k].draw(e)})),
+        {y:P.y+8,d:()=>{if(inv<=0||clock*10%2<1)GFX.person(P.x,P.y+8,P.face,P.ph,P.mv)}}].sort((a,b)=>a.y-b.y);L.forEach(o=>o.d());GFX.hud()}}}
+makeRoom('town',{music:'town',wall:'wall',floor:'floor',crate:'crate',npcs:['elder','trader','villager']});   /* [SCENE:TOWN] */
+makeRoom('cave',{music:'cave',wall:'cwall',floor:'cfloor',crate:'ccrate',enemies:5});                       /* [SCENE:CAVE] */
+
+/* ===== [SCENE:RUINS] sidscroll (platshållare: platt mark + pelare från seed, mål till höger, ut åt vänster) ===== */
+(()=>{const LEN=140,GJ=14;let h,done;
+  const S=(i,j)=>i>=LEN||j>=GJ||(i>=0&&h[i]>0&&j>=GJ-h[i]);
+  SCENES.ruins={w:960,h:540,music:'ruins',
+    enter(){const r=rngFor('ruins');h=new Array(LEN).fill(0);done=0;
+      for(let i=10;i<LEN-8;i++)if(r()<.3){const w=1+(r()*2|0),hh=1+(r()*3|0);for(let k=0;k<w;k++)h[i+k]=hh;i+=w+2}
+      P.x=90;P.y=GJ*T-22;P.vy=0;P.face=3},
+    update(dt){const ax=axis('left','right');P.mv=ax;if(ax){P.face=ax<0?2:3;P.ph+=dt*26}
+      mv(P,'x',ax*200*dt,8,22,S);const gnd=blocked(P.x,P.y+1,8,22,S);
+      if(gnd&&(A.hit('confirm')||A.hit('up')))P.vy=-640;P.vy+=1800*dt;if(mv(P,'y',P.vy*dt,8,22,S))P.vy=0;
+      if(P.x<20)go('world');                                   // ut åt vänster = lämna via samma port
+      else if(!done&&P.x>(LEN-4)*T){done=1;UI.dialog(['Slutet på ruinstaden (platshållare).'],()=>go('world'))}},
+    draw(){const cx=Math.max(0,Math.min(LEN*T-VW,P.x-VW*.4)),gr=g.createLinearGradient(0,0,0,VH);gr.addColorStop(0,'#1b2238');gr.addColorStop(1,'#5a4458');g.fillStyle=gr;g.fillRect(0,0,VW,VH);
+      for(let i=cx/T|0;i<=(cx+VW)/T;i++){const x=i*T-cx;for(let j=GJ;j<17;j++)BLOCKS.rblock.d(x,j*T);for(let k=0;k<(h[i]||0);k++)BLOCKS.rblock.d(x,(GJ-1-k)*T)}
+      g.fillStyle='#e8c050';g.fillRect((LEN-4)*T-cx,(GJ-3)*T,3,3*T);g.fillRect((LEN-4)*T-cx,(GJ-3)*T,26,14);
+      GFX.person(P.x-cx,P.y+22-cx*0,P.face,P.ph,P.mv);GFX.hud()}};})();
+
+/* ===== [SCENE:AIRFIELD] vertikal flygning (platshållare: fast bana 60–120 s från seed, ingen kollision ännu) ===== */
+(()=>{let dur,obs,ft,done;const SP=180,SY=540;
+  SCENES.airfield={w:480,h:640,music:'air',
+    enter(){const r=rngFor('air');dur=60+r()*60;ft=0;done=0;obs=[];const cols=['#e04040','#40c0e0','#e0c040','#60d060','#c060e0'];
+      for(let t=3;t<dur-3;t+=.6+r()*.8){const c=cols[r()*5|0],n=1+(r()*3|0),x0=Math.floor(r()*(17-n))*28;obs.push({t,x:x0,w:n*28,c})}   // [TODO:COLLISION]
+      P.x=240;P.y=SY},
+    update(dt){ft+=dt;P.x=Math.max(16,Math.min(464,P.x+axis('left','right')*220*dt));P.y=Math.max(60,Math.min(620,P.y+axis('up','down')*180*dt));
+      if(!done&&ft>=dur){done=1;UI.dialog(['Landning genomförd (platshållare).'],()=>go('world'))}},
+    draw(){g.fillStyle='#14304a';g.fillRect(0,0,VW,VH);g.fillStyle='#1c4466';for(let y=-64+(ft*SP%64);y<VH;y+=64)g.fillRect(0,y,VW,2);
+      for(const o of obs){const y=SY-(o.t-ft)*SP;if(y>-30&&y<VH+30){g.fillStyle=o.c;g.fillRect(o.x,y,o.w,28);g.strokeStyle='rgba(0,0,0,.4)';g.strokeRect(o.x+.5,y+.5,o.w-1,27)}}
+      g.fillStyle='#fff';g.beginPath();g.moveTo(P.x,P.y-16);g.lineTo(P.x+13,P.y+12);g.lineTo(P.x-13,P.y+12);g.fill();
+      g.fillStyle='#2a4a6a';g.fillRect(10,10,VW-20,6);g.fillStyle='#70d0ff';g.fillRect(10,10,(VW-20)*Math.min(1,ft/dur),6);GFX.hud()}};})();
+
+/* ===== [BOOT] ===== */
+newGame();go('title');requestAnimationFrame(frame);
+</script></body></html>
