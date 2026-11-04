@@ -2,6 +2,8 @@
 
 A minimalist HTML5 Canvas framework for building adventure games in a single self-contained HTML file.
 
+![Screenshot](screenshot.png)
+
 ## Overview
 
 This project provides a compact game-development foundation built around a scene-based architecture, deterministic procedural generation, and centralized content registries.
